@@ -1,0 +1,109 @@
+#pragma kernel CSPoissonInit
+#pragma kernel CSPoissonJacobi
+#pragma kernel CSElectricField
+#pragma kernel CSChargeDensity
+#pragma kernel CSElectrodeInject
+
+Texture2D<float> _Potential;
+RWTexture2D<float> _PotentialOut;
+
+Texture2D<float2> _EField;
+RWTexture2D<float2> _EFieldOut;
+
+Texture2D<float> _ChargeDens;
+RWTexture2D<float> _ChargeDensOut;
+
+Texture2D<float> _DensityField;
+Texture2D<float> _TemperatureField;
+Texture2D<float> _ElectrodeMask;
+
+float _Dx;
+float _Permittivity;
+int _GridRes;
+float _ElectrodeVoltage;
+float _ChargeScale;
+
+float2 _ElectrodePos;
+float _ElectrodeRadius;
+float _ElectrodeSign;
+
+[numthreads(16, 16, 1)]
+void CSPoissonInit(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+    _PotentialOut[id.xy] = 0;
+}
+
+[numthreads(16, 16, 1)]
+void CSPoissonJacobi(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    int2 pos = id.xy;
+    float elec = _ElectrodeMask[pos];
+
+    if (abs(elec) > 0.5)
+    {
+        _PotentialOut[id.xy] = elec;
+        return;
+    }
+
+    float pC = _Potential[pos];
+    float pL = (pos.x > 0) ? _Potential[pos - int2(1,0)] : pC;
+    float pR = (pos.x < _GridRes-1) ? _Potential[pos + int2(1,0)] : pC;
+    float pB = (pos.y > 0) ? _Potential[pos - int2(0,1)] : pC;
+    float pT = (pos.y < _GridRes-1) ? _Potential[pos + int2(0,1)] : pC;
+
+    float charge = _ChargeDens[pos];
+
+    float rhs = -charge * _Dx * _Dx / _Permittivity;
+
+    _PotentialOut[id.xy] = (pL + pR + pB + pT - rhs) * 0.25;
+}
+
+[numthreads(16, 16, 1)]
+void CSElectricField(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    int2 pos = id.xy;
+    float pC = _Potential[pos];
+    float pL = (pos.x > 0) ? _Potential[pos - int2(1,0)] : pC;
+    float pR = (pos.x < _GridRes-1) ? _Potential[pos + int2(1,0)] : pC;
+    float pB = (pos.y > 0) ? _Potential[pos - int2(0,1)] : pC;
+    float pT = (pos.y < _GridRes-1) ? _Potential[pos + int2(0,1)] : pC;
+
+    float2 eField;
+    eField.x = -(pR - pL) / (2.0 * _Dx);
+    eField.y = -(pT - pB) / (2.0 * _Dx);
+
+    _EFieldOut[id.xy] = eField;
+}
+
+[numthreads(16, 16, 1)]
+void CSChargeDensity(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    float rho = _DensityField[id.xy];
+    float T = _TemperatureField[id.xy];
+
+    float ionizationFrac = saturate((T - 5000.0) / 10000.0);
+    float netCharge = rho * ionizationFrac * _ChargeScale;
+
+    _ChargeDensOut[id.xy] = netCharge;
+}
+
+[numthreads(16, 16, 1)]
+void CSElectrodeInject(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    float2 cellPos = float2((id.x + 0.5) * _Dx, (id.y + 0.5) * _Dx);
+    float dist = length(cellPos - _ElectrodePos);
+
+    if (dist < _ElectrodeRadius)
+    {
+        _PotentialOut[id.xy] = _ElectrodeVoltage * _ElectrodeSign;
+    }
+}

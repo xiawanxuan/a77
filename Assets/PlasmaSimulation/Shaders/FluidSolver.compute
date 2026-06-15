@@ -1,0 +1,262 @@
+#pragma kernel CSAdvection
+#pragma kernel CSDiffusion
+#pragma kernel CSPressureJacobi
+#pragma kernel CSPressureGradientSubtract
+#pragma kernel CSInjectSource
+#pragma kernel CSTemperatureUpdate
+#pragma kernel CSDensityBoundary
+#pragma kernel CSVelocityBoundary
+#pragma kernel CSClearField
+
+Texture2D<float> _Density;
+RWTexture2D<float> _DensityOut;
+
+Texture2D<float2> _Velocity;
+RWTexture2D<float2> _VelocityOut;
+
+Texture2D<float> _Pressure;
+RWTexture2D<float> _PressureOut;
+
+Texture2D<float> _Temperature;
+RWTexture2D<float> _TemperatureOut;
+
+Texture2D<float> _Divergence;
+RWTexture2D<float> _DivergenceOut;
+
+Texture2D<float> _ChargeDensity;
+Texture2D<float2> _ElectricField;
+
+float _Dx;
+float _Dt;
+float _Viscosity;
+float _ThermalDiffusivity;
+float _DensityDiffusion;
+float _PressureScale;
+float _AmbientDensity;
+float _AmbientTemperature;
+int _GridRes;
+float _AblationEfficiency;
+float _RadiationCooling;
+float _BremsstrahlungCoeff;
+float _ChargeCoupling;
+
+float2 _SourcePos;
+float _SourceRadius;
+float _SourceStrength;
+float _SourceTemperature;
+float _SourceDensity;
+
+int _PressureIter;
+
+[numthreads(16, 16, 1)]
+void CSAdvection(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    float2 uv = float2(id.x + 0.5, id.y + 0.5);
+    float2 vel = _Velocity[id.xy];
+    float2 prevPos = uv - vel * _Dt / _Dx;
+
+    prevPos = clamp(prevPos, float2(0.5, 0.5), float2(_GridRes - 0.5, _GridRes - 0.5));
+
+    int2 p0 = int2(floor(prevPos.x - 0.5), floor(prevPos.y - 0.5));
+    p0 = clamp(p0, int2(0, 0), int2(_GridRes - 2, _GridRes - 2));
+    int2 p1 = p0 + 1;
+
+    float2 f = prevPos - float2(p0.x + 0.5, p0.y + 0.5);
+
+    _VelocityOut[id.xy] = float2(
+        lerp(lerp(_Velocity[p0].x, _Velocity[p1].x, f.x), lerp(_Velocity[p0 + int2(0,1)].x, _Velocity[p1 + int2(0,1)].x, f.x), f.y),
+        lerp(lerp(_Velocity[p0].y, _Velocity[p1].y, f.x), lerp(_Velocity[p0 + int2(0,1)].y, _Velocity[p1 + int2(0,1)].y, f.x), f.y)
+    );
+
+    _DensityOut[id.xy] = lerp(
+        lerp(_Density[p0], _Density[p1], f.x),
+        lerp(_Density[p0 + int2(0,1)], _Density[p1 + int2(0,1)], f.x),
+        f.y
+    );
+
+    _TemperatureOut[id.xy] = lerp(
+        lerp(_Temperature[p0], _Temperature[p1], f.x),
+        lerp(_Temperature[p0 + int2(0,1)], _Temperature[p1 + int2(0,1)], f.x),
+        f.y
+    );
+}
+
+[numthreads(16, 16, 1)]
+void CSDiffusion(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    float a_v = _Viscosity * _Dt / (_Dx * _Dx);
+    float a_t = _ThermalDiffusivity * _Dt / (_Dx * _Dx);
+    float a_d = _DensityDiffusion * _Dt / (_Dx * _Dx);
+
+    int2 pos = id.xy;
+    float2 vC = _Velocity[pos];
+    float tC = _Temperature[pos];
+    float dC = _Density[pos];
+
+    float2 vL = (pos.x > 0) ? _Velocity[pos - int2(1,0)] : vC;
+    float2 vR = (pos.x < _GridRes-1) ? _Velocity[pos + int2(1,0)] : vC;
+    float2 vB = (pos.y > 0) ? _Velocity[pos - int2(0,1)] : vC;
+    float2 vT = (pos.y < _GridRes-1) ? _Velocity[pos + int2(0,1)] : vC;
+
+    float tL = (pos.x > 0) ? _Temperature[pos - int2(1,0)] : tC;
+    float tR = (pos.x < _GridRes-1) ? _Temperature[pos + int2(1,0)] : tC;
+    float tB = (pos.y > 0) ? _Temperature[pos - int2(0,1)] : tC;
+    float tT = (pos.y < _GridRes-1) ? _Temperature[pos + int2(0,1)] : tC;
+
+    float dL = (pos.x > 0) ? _Density[pos - int2(1,0)] : dC;
+    float dR = (pos.x < _GridRes-1) ? _Density[pos + int2(1,0)] : dC;
+    float dB = (pos.y > 0) ? _Density[pos - int2(0,1)] : dC;
+    float dT = (pos.y < _GridRes-1) ? _Density[pos + int2(0,1)] : dC;
+
+    _VelocityOut[id.xy] = (vC + a_v * (vL + vR + vB + vT)) / (1.0 + 4.0 * a_v);
+    _TemperatureOut[id.xy] = (tC + a_t * (tL + tR + tB + tT)) / (1.0 + 4.0 * a_t);
+    _DensityOut[id.xy] = (dC + a_d * (dL + dR + dB + dT)) / (1.0 + 4.0 * a_d);
+}
+
+[numthreads(16, 16, 1)]
+void CSPressureJacobi(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    int2 pos = id.xy;
+    float pC = _Pressure[pos];
+    float pL = (pos.x > 0) ? _Pressure[pos - int2(1,0)] : pC;
+    float pR = (pos.x < _GridRes-1) ? _Pressure[pos + int2(1,0)] : pC;
+    float pB = (pos.y > 0) ? _Pressure[pos - int2(0,1)] : pC;
+    float pT = (pos.y < _GridRes-1) ? _Pressure[pos + int2(0,1)] : pC;
+
+    float div = _Divergence[pos];
+
+    _PressureOut[id.xy] = (pL + pR + pB + pT - div) * 0.25;
+}
+
+[numthreads(16, 16, 1)]
+void CSPressureGradientSubtract(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    int2 pos = id.xy;
+    float pC = _Pressure[pos];
+    float pL = (pos.x > 0) ? _Pressure[pos - int2(1,0)] : pC;
+    float pR = (pos.x < _GridRes-1) ? _Pressure[pos + int2(1,0)] : pC;
+    float pB = (pos.y > 0) ? _Pressure[pos - int2(0,1)] : pC;
+    float pT = (pos.y < _GridRes-1) ? _Pressure[pos + int2(0,1)] : pC;
+
+    float2 vel = _Velocity[pos];
+    vel.x -= 0.5 * (pR - pL) * _PressureScale;
+    vel.y -= 0.5 * (pT - pB) * _PressureScale;
+
+    if (_ChargeCoupling > 0.0)
+    {
+        float2 eField = _ElectricField[pos];
+        float charge = _ChargeDensity[pos];
+        vel += eField * charge * _ChargeCoupling * _Dt;
+    }
+
+    _VelocityOut[id.xy] = vel;
+
+    _DivergenceOut[id.xy] = -0.5 * _Dx * (
+        (pos.x < _GridRes-1 ? _Velocity[pos + int2(1,0)].x : 0.0) -
+        (pos.x > 0 ? _Velocity[pos - int2(1,0)].x : 0.0) +
+        (pos.y < _GridRes-1 ? _Velocity[pos + int2(0,1)].y : 0.0) -
+        (pos.y > 0 ? _Velocity[pos - int2(0,1)].y : 0.0)
+    );
+}
+
+[numthreads(16, 16, 1)]
+void CSInjectSource(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    float2 cellPos = float2((id.x + 0.5) * _Dx, (id.y + 0.5) * _Dx);
+    float dist = length(cellPos - _SourcePos);
+
+    if (dist < _SourceRadius * 3.0)
+    {
+        float falloff = exp(-dist * dist / (2.0 * _SourceRadius * _SourceRadius));
+
+        float densityAdd = _SourceDensity * _SourceStrength * falloff * _Dt;
+        float tempAdd = _SourceTemperature * _SourceStrength * falloff * _Dt;
+        _DensityOut[id.xy] = _Density[id.xy] + densityAdd;
+        _TemperatureOut[id.xy] = _Temperature[id.xy] + tempAdd;
+
+        if (_SourceStrength > 0.01)
+        {
+            float2 dir = normalize(cellPos - _SourcePos + float2(0.0001, 0.0001));
+            float2 velAdd = dir * _SourceStrength * falloff * _AblationEfficiency;
+            _VelocityOut[id.xy] = _Velocity[id.xy] + velAdd;
+        }
+    }
+    else
+    {
+        _DensityOut[id.xy] = _Density[id.xy];
+        _TemperatureOut[id.xy] = _Temperature[id.xy];
+        _VelocityOut[id.xy] = _Velocity[id.xy];
+    }
+}
+
+[numthreads(16, 16, 1)]
+void CSTemperatureUpdate(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    float T = _Temperature[id.xy];
+    float rho = _Density[id.xy];
+
+    float radCool = _RadiationCooling * (T - _AmbientTemperature) * _Dt;
+    float bremCool = _BremsstrahlungCoeff * rho * sqrt(max(T, 1.0)) * _Dt;
+
+    T = max(T - radCool - bremCool, _AmbientTemperature);
+
+    if (rho < _AmbientDensity * 1.5)
+    {
+        T = lerp(T, _AmbientTemperature, 0.01);
+    }
+
+    _TemperatureOut[id.xy] = T;
+}
+
+[numthreads(16, 16, 1)]
+void CSDensityBoundary(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    float d = _Density[id.xy];
+    d = max(d, _AmbientDensity);
+    d = min(d, 10.0);
+    _DensityOut[id.xy] = d;
+}
+
+[numthreads(16, 16, 1)]
+void CSVelocityBoundary(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    int2 pos = id.xy;
+    float2 v = _Velocity[pos];
+
+    if (pos.x == 0 || pos.x == _GridRes - 1) v.x = 0;
+    if (pos.y == 0) v.y = abs(v.y) * 0.5;
+    if (pos.y == _GridRes - 1) v.y = -abs(v.y) * 0.5;
+
+    float speed = length(v);
+    if (speed > 50.0) v = v / speed * 50.0;
+
+    _VelocityOut[id.xy] = v;
+}
+
+[numthreads(16, 16, 1)]
+void CSClearField(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    _DensityOut[id.xy] = _AmbientDensity;
+    _VelocityOut[id.xy] = float2(0, 0);
+    _PressureOut[id.xy] = 0;
+    _TemperatureOut[id.xy] = _AmbientTemperature;
+    _DivergenceOut[id.xy] = 0;
+}
