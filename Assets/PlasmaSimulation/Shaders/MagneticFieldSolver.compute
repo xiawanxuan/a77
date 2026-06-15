@@ -1,0 +1,179 @@
+#pragma kernel CSCoilInject
+#pragma kernel CSMagneticAdvection
+#pragma kernel CSMagneticDiffusion
+#pragma kernel CSLorentzForce
+#pragma kernel CSMagneticClear
+#pragma kernel CSMagneticBoundary
+
+Texture2D<float> _MagneticField;
+RWTexture2D<float> _MagneticFieldOut;
+
+Texture2D<float2> _Velocity;
+Texture2D<float> _Density;
+Texture2D<float> _ChargeDensity;
+
+RWTexture2D<float2> _VelocityOut;
+
+float _Dx;
+float _Dt;
+float _MagneticViscosity;
+int _GridRes;
+float _VacuumPermeability;
+float _LorentzStrength;
+float _MaxB;
+float _PulseFactor;
+
+float2 _CoilPos;
+float _CoilRadius;
+float _CoilCurrent;
+float _CoilSign;
+
+[numthreads(16, 16, 1)]
+void CSCoilInject(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    float2 cellPos = float2((id.x + 0.5) * _Dx, (id.y + 0.5) * _Dx);
+    float2 r = cellPos - _CoilPos;
+    float dist = length(r);
+
+    float B = 0;
+
+    if (dist < _CoilRadius * 0.1)
+    {
+        B = _CoilCurrent * 0.5 / _CoilRadius;
+    }
+    else
+    {
+        float a = _CoilRadius;
+        float z = 0.001;
+        float rho = dist;
+        float kSq = 4.0 * a * rho / ((a + rho) * (a + rho) + z * z);
+        float k = sqrt(max(kSq, 1e-10f));
+
+        float K = 1.5708f + k * k * 0.4325f + k * k * k * k * 0.1538f;
+        float E = 1.5708f - k * k * 0.4630f - k * k * k * k * 0.1077f;
+
+        float zeta = z > 0 ? z : 0.001f;
+        float coeff = _VacuumPermeability * _CoilCurrent * zeta
+                     / (2.0 * 3.14159265359f * rho * sqrt((a + rho) * (a + rho) + z * z));
+
+        B = coeff * (E * (a * a + rho * rho + z * z) / ((a - rho) * (a - rho) + z * z) - K);
+        B = abs(B);
+    }
+
+    B *= _CoilSign * _PulseFactor;
+    B = clamp(B, -_MaxB, _MaxB);
+
+    float prevB = _MagneticField[id.xy];
+    _MagneticFieldOut[id.xy] = prevB + B * 0.01;
+}
+
+[numthreads(16, 16, 1)]
+void CSMagneticAdvection(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    float2 uv = float2(id.x + 0.5, id.y + 0.5);
+    float2 vel = _Velocity[id.xy];
+    float2 prevPos = uv - vel * _Dt / _Dx;
+
+    prevPos = clamp(prevPos, float2(0.5, 0.5), float2(_GridRes - 0.5, _GridRes - 0.5));
+
+    int2 p0 = int2(floor(prevPos.x - 0.5), floor(prevPos.y - 0.5));
+    p0 = clamp(p0, int2(0, 0), int2(_GridRes - 2, _GridRes - 2));
+    int2 p1 = p0 + 1;
+    float2 f = prevPos - float2(p0.x + 0.5, p0.y + 0.5);
+
+    float b00 = _MagneticField[p0];
+    float b10 = _MagneticField[p1];
+    float b01 = _MagneticField[p0 + int2(0,1)];
+    float b11 = _MagneticField[p1 + int2(0,1)];
+
+    float B = lerp(lerp(b00, b10, f.x), lerp(b01, b11, f.x), f.y);
+
+    _MagneticFieldOut[id.xy] = B;
+}
+
+[numthreads(16, 16, 1)]
+void CSMagneticDiffusion(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    int2 pos = id.xy;
+    float bC = _MagneticField[pos];
+
+    float bL = (pos.x > 0) ? _MagneticField[pos - int2(1,0)] : bC;
+    float bR = (pos.x < _GridRes-1) ? _MagneticField[pos + int2(1,0)] : bC;
+    float bB = (pos.y > 0) ? _MagneticField[pos - int2(0,1)] : bC;
+    float bT = (pos.y < _GridRes-1) ? _MagneticField[pos + int2(0,1)] : bC;
+
+    float a = _MagneticViscosity * _Dt / (_Dx * _Dx);
+
+    float B = (bC + a * (bL + bR + bB + bT)) / (1.0 + 4.0 * a);
+    B = clamp(B, -_MaxB, _MaxB);
+
+    _MagneticFieldOut[id.xy] = B;
+}
+
+[numthreads(16, 16, 1)]
+void CSLorentzForce(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    int2 pos = id.xy;
+    float2 vel = _Velocity[pos];
+    float Bz = _MagneticField[pos];
+    float charge = _ChargeDensity[pos];
+    float rho = max(_Density[pos], 0.0001f);
+
+    if (abs(Bz) < 1e-10)
+    {
+        _VelocityOut[id.xy] = vel;
+        return;
+    }
+
+    float2 vCrossB = float2(vel.y * Bz, -vel.x * Bz);
+
+    float chargeFactor = charge > 0 ? abs(charge) : 0.001f;
+    float2 lorentzForce = vCrossB * _LorentzStrength * _Dt * chargeFactor / rho;
+
+    float2 newVel = vel + lorentzForce;
+
+    float speed = length(newVel);
+    if (speed > 50.0) newVel = newVel / speed * 50.0;
+
+    _VelocityOut[id.xy] = newVel;
+}
+
+[numthreads(16, 16, 1)]
+void CSMagneticClear(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+    _MagneticFieldOut[id.xy] = 0.0;
+}
+
+[numthreads(16, 16, 1)]
+void CSMagneticBoundary(uint3 id : SV_DispatchThreadID)
+{
+    if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
+
+    int2 pos = id.xy;
+    float B = _MagneticField[pos];
+
+    int boundaryWidth = 4;
+    int distX = min(pos.x, _GridRes - 1 - pos.x);
+    int distY = min(pos.y, _GridRes - 1 - pos.y);
+    int minDist = min(distX, distY);
+
+    if (minDist < boundaryWidth)
+    {
+        float decay = (float)minDist / (float)boundaryWidth;
+        decay = decay * decay;
+        B *= decay;
+    }
+
+    B = clamp(B, -_MaxB, _MaxB);
+
+    _MagneticFieldOut[id.xy] = B;
+}

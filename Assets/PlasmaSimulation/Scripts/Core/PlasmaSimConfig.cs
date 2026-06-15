@@ -47,6 +47,17 @@ public class PlasmaSimConfig : ScriptableObject
     public float chargeCouplingStrength = 0.5f;
     public int electricFieldIterations = 30;
 
+    [Header("Magnetic Field")]
+    public float vacuumPermeability = 1.25663706212e-6f;
+    public float coilCurrent = 100f;
+    public float coilRadius = 0.05f;
+    public float lorentzForceStrength = 1.0f;
+    public float magneticViscosity = 0.00001f;
+    public int magneticFieldIterations = 20;
+    public float maxMagneticField = 10f;
+    public bool enableMagneticField = false;
+    [Range(0f, 1f)] public float magneticFieldPulse = 1.0f;
+
     [Header("Radiation Cooling")]
     public float radiationCoolingCoeff = 1e-4f;
     public float bremsstrahlungCoeff = 1e-6f;

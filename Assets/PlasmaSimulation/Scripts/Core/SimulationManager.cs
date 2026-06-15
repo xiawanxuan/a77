@@ -12,13 +12,17 @@ public class SimulationManager : MonoBehaviour
     public ElectrodeController electrodeController;
     public PlasmaGlowRenderer glowRenderer;
     public ThermalOverlayRenderer thermalRenderer;
+    public MagneticFieldRenderer magneticRenderer;
     public SnapshotManager snapshotManager;
     public SimulationUIController uiController;
+    public MagneticFieldSolver magneticSolver;
+    public CoilController coilController;
 
     public float simulationTimeScale = 1.0f;
     public bool pauseSimulation = false;
     public bool enableElectricField = false;
     public bool enableParticlePhysics = true;
+    public bool enableMagneticField = false;
 
     private Mesh displayQuad;
     private float simulationTime;
@@ -58,15 +62,23 @@ public class SimulationManager : MonoBehaviour
             glowRenderer = GetComponent<PlasmaGlowRenderer>();
         if (thermalRenderer == null)
             thermalRenderer = GetComponent<ThermalOverlayRenderer>();
+        if (magneticRenderer == null)
+            magneticRenderer = GetComponent<MagneticFieldRenderer>();
         if (snapshotManager == null)
             snapshotManager = GetComponent<SnapshotManager>();
+        if (magneticSolver == null)
+            magneticSolver = GetComponent<MagneticFieldSolver>();
+        if (coilController == null)
+            coilController = GetComponent<CoilController>();
 
         fluidSolver?.Initialize(config);
         efieldSolver?.Initialize(config);
+        magneticSolver?.Initialize(config);
         particleModule?.Initialize(config);
         targetSurface?.Initialize(config);
         glowRenderer?.Initialize(config);
         thermalRenderer?.Initialize(config);
+        magneticRenderer?.Initialize(config);
         snapshotManager?.Initialize(config);
 
         CreateDisplayQuad();
@@ -82,6 +94,12 @@ public class SimulationManager : MonoBehaviour
         {
             electrodeController.config = config;
             electrodeController.efieldSolver = efieldSolver;
+        }
+
+        if (coilController != null)
+        {
+            coilController.config = config;
+            coilController.magneticSolver = magneticSolver;
         }
     }
 
@@ -116,6 +134,21 @@ public class SimulationManager : MonoBehaviour
             fluidSolver.Step(null, null);
         }
 
+        if ((enableMagneticField || config.enableMagneticField) && magneticSolver != null && magneticSolver.IsInitialized)
+        {
+            RenderTexture chargeRT = (efieldSolver != null && efieldSolver.IsInitialized)
+                ? efieldSolver.ChargeDensityTexture
+                : null;
+
+            magneticSolver.Step(
+                fluidSolver.GetVelocityBuffer(),
+                fluidSolver.GetDensityBuffer(),
+                chargeRT,
+                fluidSolver.GetVelocityOutputBuffer()
+            );
+            fluidSolver.ApplyVelocityCorrection();
+        }
+
         simulationTime += dt;
 
         UpdateRendering();
@@ -131,6 +164,12 @@ public class SimulationManager : MonoBehaviour
         if (thermalRenderer != null && config.showThermalOverlay && fluidSolver.IsInitialized)
         {
             thermalRenderer.RenderToQuad(fluidSolver.temperatureRT, fluidSolver.densityRT, displayQuad);
+        }
+
+        if (magneticRenderer != null && (enableMagneticField || config.enableMagneticField)
+            && magneticSolver != null && magneticSolver.IsInitialized)
+        {
+            magneticRenderer.RenderToQuad(magneticSolver.magneticFieldRT, displayQuad);
         }
     }
 
@@ -157,6 +196,11 @@ public class SimulationManager : MonoBehaviour
         {
             targetSurface.ResetDamage();
         }
+
+        if (magneticSolver != null && magneticSolver.IsInitialized)
+        {
+            magneticSolver.ClearMagneticField();
+        }
     }
 
     public void SetThermalOverlayVisible(bool visible)
@@ -165,6 +209,11 @@ public class SimulationManager : MonoBehaviour
         {
             thermalRenderer.SetVisible(visible);
         }
+    }
+
+    public void ToggleMagneticField(bool enabled)
+    {
+        enableMagneticField = enabled;
     }
 
     public void ToggleElectricField(bool enabled)

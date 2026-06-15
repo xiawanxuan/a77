@@ -271,6 +271,20 @@ public class PlasmaFluidSolver : MonoBehaviour
         Graphics.Blit(source, dest);
     }
 
+    public RenderTexture GetVelocityOutputBuffer()
+    {
+        return velocityRT2;
+    }
+
+    public void ApplyVelocityCorrection()
+    {
+        SwapVelocity();
+    }
+
+    public RenderTexture GetDensityBuffer() => densityRT;
+    public RenderTexture GetVelocityBuffer() => velocityRT;
+    public RenderTexture GetTemperatureBuffer() => temperatureRT;
+
     void OnDestroy()
     {
         ReleaseRT(densityRT, densityRT2, velocityRT, velocityRT2,
