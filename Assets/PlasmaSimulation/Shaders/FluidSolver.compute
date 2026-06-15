@@ -217,6 +217,19 @@ void CSTemperatureUpdate(uint3 id : SV_DispatchThreadID)
         T = lerp(T, _AmbientTemperature, 0.01);
     }
 
+    int2 pos2 = id.xy;
+    int boundaryWidth2 = 4;
+    int distX2 = min(pos2.x, _GridRes - 1 - pos2.x);
+    int distY2 = min(pos2.y, _GridRes - 1 - pos2.y);
+    int minDist2 = min(distX2, distY2);
+
+    if (minDist2 < boundaryWidth2)
+    {
+        float decayFactor = (float)minDist2 / (float)boundaryWidth2;
+        decayFactor = decayFactor * decayFactor;
+        T = _AmbientTemperature + (T - _AmbientTemperature) * decayFactor;
+    }
+
     _TemperatureOut[id.xy] = T;
 }
 
@@ -225,9 +238,23 @@ void CSDensityBoundary(uint3 id : SV_DispatchThreadID)
 {
     if (id.x >= (uint)_GridRes || id.y >= (uint)_GridRes) return;
 
+    int2 pos = id.xy;
     float d = _Density[id.xy];
     d = max(d, _AmbientDensity);
     d = min(d, 10.0);
+
+    int boundaryWidth = 4;
+    int distX = min(pos.x, _GridRes - 1 - pos.x);
+    int distY = min(pos.y, _GridRes - 1 - pos.y);
+    int minDist = min(distX, distY);
+
+    if (minDist < boundaryWidth)
+    {
+        float decayFactor = (float)minDist / (float)boundaryWidth;
+        decayFactor = decayFactor * decayFactor;
+        d = _AmbientDensity + (d - _AmbientDensity) * decayFactor;
+    }
+
     _DensityOut[id.xy] = d;
 }
 
@@ -242,6 +269,18 @@ void CSVelocityBoundary(uint3 id : SV_DispatchThreadID)
     if (pos.x == 0 || pos.x == _GridRes - 1) v.x = 0;
     if (pos.y == 0) v.y = abs(v.y) * 0.5;
     if (pos.y == _GridRes - 1) v.y = -abs(v.y) * 0.5;
+
+    int boundaryWidth = 4;
+    int distX = min(pos.x, _GridRes - 1 - pos.x);
+    int distY = min(pos.y, _GridRes - 1 - pos.y);
+    int minDist = min(distX, distY);
+
+    if (minDist < boundaryWidth)
+    {
+        float damping = (float)minDist / (float)boundaryWidth;
+        damping = damping * damping;
+        v *= damping;
+    }
 
     float speed = length(v);
     if (speed > 50.0) v = v / speed * 50.0;
